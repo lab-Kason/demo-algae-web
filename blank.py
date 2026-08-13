@@ -36,18 +36,17 @@ st.set_page_config(
 )
 
 # ---------- 动态获取有效 Tank 列表 ----------
-@st.cache_data(ttl=60)  # 缓存60秒，减少扫描频率
+@st.cache_data(ttl=60)
 def get_valid_tanks():
-    """扫描传感器表，返回所有存在的 device_id 列表"""
     try:
         response = sensor_table.scan(Select='SPECIFIC_ATTRIBUTES', AttributesToGet=['device_id'])
         items = response.get('Items', [])
         tanks = list(set([item['device_id'] for item in items if 'device_id' in item]))
-        return sorted(tanks) if tanks else ["ESP32_Tank_001"]  # 如果没有数据，返回默认
-    except Exception as e:
-        return ["ESP32_Tank_001"]  # 出错时返回默认
+        return sorted(tanks) if tanks else ["ESP32_Tank_001"]
+    except Exception:
+        return ["ESP32_Tank_001"]
 
-# ---------- 页面控制（封面/监控） ----------
+# ---------- 页面控制 ----------
 page = st.query_params.get("page", "cover")
 
 # ---------- 语言管理 ----------
@@ -85,6 +84,7 @@ TRANSLATIONS = {
         "auto_refresh_label": "自動刷新數據（每10秒）",
         "no_api_key_warning": "未配置 {tank} 的 DeepSeek API Key，請在 Secrets 中添加 DEEPSEEK_{key}",
         "invalid_tank": "⚠️ 當前 Tank 無效，已自動切換至 {tank}",
+        "back_to_cover": "🏠 返回封面頁",
     },
     "en": {
         "app_title": "🌿 Algae Monitor",
@@ -115,6 +115,7 @@ TRANSLATIONS = {
         "auto_refresh_label": "Auto-refresh data (every 10s)",
         "no_api_key_warning": "DeepSeek API Key not configured for {tank}. Please add DEEPSEEK_{key} in Secrets.",
         "invalid_tank": "⚠️ Current Tank is invalid, automatically switched to {tank}",
+        "back_to_cover": "🏠 Back to Cover",
     }
 }
 
@@ -124,7 +125,7 @@ def t(key, **kwargs):
         return text.format(**kwargs)
     return text
 
-# ---------- 语言切换（右上角） ----------
+# ---------- 语言切换 ----------
 col_title, col_lang = st.columns([3, 1])
 with col_lang:
     selected_lang = st.selectbox(
@@ -144,7 +145,6 @@ valid_tanks = get_valid_tanks()
 # ---------- 封面页 ----------
 if page != "monitor":
     current_tank = st.query_params.get("tank", valid_tanks[0] if valid_tanks else "ESP32_Tank_001")
-    # 如果当前 tank 不在有效列表中，自动修正
     if current_tank not in valid_tanks:
         current_tank = valid_tanks[0] if valid_tanks else "ESP32_Tank_001"
         st.query_params.tank = current_tank
@@ -178,9 +178,6 @@ if page != "monitor":
             background: #1abc9c;
             margin: 1rem auto;
         }
-        .cover-select {
-            margin: 1.5rem 0;
-        }
         .cover-button {
             background-color: #1abc9c;
             color: white;
@@ -190,8 +187,6 @@ if page != "monitor":
             border: none;
             cursor: pointer;
             transition: 0.3s;
-            text-decoration: none;
-            display: inline-block;
         }
         .cover-button:hover {
             background-color: #16a085;
@@ -233,7 +228,6 @@ if page != "monitor":
     st.stop()
 
 # ---------- 监控页 ----------
-# 自动修正无效 tank
 tank_id = st.query_params.get("tank", valid_tanks[0] if valid_tanks else "ESP32_Tank_001")
 if tank_id not in valid_tanks:
     tank_id = valid_tanks[0] if valid_tanks else "ESP32_Tank_001"
@@ -241,7 +235,7 @@ if tank_id not in valid_tanks:
     st.warning(t("invalid_tank", tank=tank_id))
     st.rerun()
 
-# ---------- 自动刷新（带暂停标记） ----------
+# ---------- 自动刷新 ----------
 if "pause_autorefresh" not in st.session_state:
     st.session_state.pause_autorefresh = False
 
@@ -249,7 +243,13 @@ auto_refresh = st.sidebar.checkbox(t("auto_refresh_label"), value=True, key="aut
 if auto_refresh and not st.session_state.pause_autorefresh:
     st_autorefresh(interval=10000, key="data_refresh")
 
-# ---------- 工具函数（传感器数据） ----------
+# ---------- 返回封面按钮（侧边栏） ----------
+st.sidebar.markdown("---")
+if st.sidebar.button(t("back_to_cover"), use_container_width=True):
+    st.query_params.page = None  # 移除 page 参数
+    st.rerun()
+
+# ---------- 工具函数 ----------
 def convert_decimals(obj):
     if isinstance(obj, list):
         return [convert_decimals(i) for i in obj]
@@ -278,7 +278,6 @@ def get_last_n(device_id, n=500):
     items.reverse()
     return convert_decimals(items)
 
-# ---------- AI 核心功能（Function Calling） ----------
 def query_sensor_data(tank_id, metric, stats='avg', limit=500):
     items = get_last_n(tank_id, n=limit)
     if not items:
@@ -334,7 +333,6 @@ def call_deepseek_with_tools(messages, api_key, tools):
     except Exception as e:
         return f"❌ 请求异常：{e}", None
 
-# ---------- AI 辅助函数 ----------
 def get_deepseek_api_key(tank_id):
     key_name = f"DEEPSEEK_{tank_id.replace('-', '_')}"
     return st.secrets.get(key_name)
@@ -429,7 +427,6 @@ else:
 
     user_input = st.chat_input(t("ai_input_placeholder"))
     if user_input:
-        # 暂停自动刷新，避免中断
         st.session_state.pause_autorefresh = True
         with st.chat_message("user"):
             st.markdown(user_input)
@@ -495,7 +492,6 @@ else:
         st.rerun()
 
 # ---------- 设备切换 ----------
-# 使用动态列表，并在切换时暂停自动刷新
 selected_tank = st.selectbox(
     t("switch_tank"),
     options=valid_tanks,
