@@ -152,7 +152,24 @@ if page != "monitor":
 
     st.markdown("""
         <style>
+        /* 全屏背景图片 + 半透明遮罩 */
+        .stApp {
+            background: url("WhatsApp Image 2026-08-13 at 11.25.38.jpeg") no-repeat center center;
+            background-size: cover;
+        }
+        .stApp::before {
+            content: "";
+            position: fixed;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            background-color: rgba(0, 0, 0, 0.4);  /* 半透明遮罩，增强文字可读性 */
+            z-index: 0;
+        }
         .cover-container {
+            position: relative;
+            z-index: 1;
             display: flex;
             flex-direction: column;
             align-items: center;
@@ -160,16 +177,19 @@ if page != "monitor":
             height: 70vh;
             text-align: center;
             padding: 20px;
+            color: white;
+            text-shadow: 0 0 15px rgba(0,0,0,0.8);
         }
         .cover-title {
             font-size: 3.5rem;
             font-weight: bold;
-            color: #1abc9c;
+            color: #ffffff;
             margin-bottom: 0.5rem;
+            text-shadow: 0 0 20px rgba(0,0,0,0.7);
         }
         .cover-sub {
             font-size: 1.2rem;
-            color: #555;
+            color: #f0f0f0;
             margin-bottom: 1.5rem;
         }
         .cover-divider {
@@ -177,6 +197,11 @@ if page != "monitor":
             height: 3px;
             background: #1abc9c;
             margin: 1rem auto;
+        }
+        .cover-select-label {
+            font-size: 1.0rem;
+            color: #f0f0f0;
+            margin: 0.5rem 0;
         }
         .cover-button {
             background-color: #1abc9c;
@@ -187,10 +212,16 @@ if page != "monitor":
             border: none;
             cursor: pointer;
             transition: 0.3s;
+            text-decoration: none;
+            display: inline-block;
         }
         .cover-button:hover {
             background-color: #16a085;
             transform: scale(1.03);
+        }
+        /* 调整 Selectbox 文字颜色以在深色背景上可见 */
+        .stSelectbox label {
+            color: #f0f0f0 !important;
         }
         </style>
     """, unsafe_allow_html=True)
@@ -198,16 +229,14 @@ if page != "monitor":
     st.markdown("""
         <div class="cover-container">
             <div class="cover-title">🌿 藻類監測系統 Algae Monitor</div>
-            <div style="font-size: 1.1rem; color: #777; margin-bottom: 0.3rem;">
+            <div style="font-size: 1.1rem; color: #e0e0e0; margin-bottom: 0.3rem;">
                 智慧監測 ｜ 即時分析 ｜ 數據驅動
             </div>
-            <div style="font-size: 1.0rem; color: #999; margin-bottom: 0.3rem;">
+            <div style="font-size: 1.0rem; color: #cccccc; margin-bottom: 0.3rem;">
                 Intelligent Monitoring | Real-time Analysis | Data-driven
             </div>
             <div class="cover-divider"></div>
-            <div style="font-size: 1.0rem; color: #444; margin: 0.5rem 0;">
-                選擇培養罐 / Select Tank
-            </div>
+            <div class="cover-select-label">選擇培養罐 / Select Tank</div>
     """, unsafe_allow_html=True)
 
     selected_tank = st.selectbox(
@@ -243,10 +272,10 @@ auto_refresh = st.sidebar.checkbox(t("auto_refresh_label"), value=True, key="aut
 if auto_refresh and not st.session_state.pause_autorefresh:
     st_autorefresh(interval=10000, key="data_refresh")
 
-# ---------- 返回封面按钮（侧边栏） ----------
+# ---------- 返回封面按钮 ----------
 st.sidebar.markdown("---")
 if st.sidebar.button(t("back_to_cover"), use_container_width=True):
-    st.query_params.page = None  # 移除 page 参数
+    st.query_params.page = None
     st.rerun()
 
 # ---------- 工具函数 ----------

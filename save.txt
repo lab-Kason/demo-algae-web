@@ -8,7 +8,7 @@ import json
 import time
 import requests
 from datetime import datetime
-from streamlit_autorefresh import st_autorefresh  # 新增自动刷新组件
+from streamlit_autorefresh import st_autorefresh
 
 # ---------- 从 Secrets 读取凭证 ----------
 AWS_ACCESS_KEY_ID = st.secrets["AWS_ACCESS_KEY_ID"]
@@ -35,16 +35,221 @@ st.set_page_config(
     layout="wide"
 )
 
-# ---------- 自动刷新（每10秒，仅在未进行聊天输入时有效） ----------
-# 注意：自动刷新会重新运行整个脚本，但不会丢失聊天历史（存在DynamoDB）
-# 如果用户正在输入，刷新会中断输入，因此建议在演示时使用，或提供开关
-auto_refresh = st.sidebar.checkbox("自动刷新数据（每10秒）", value=True)
-if auto_refresh:
+# ---------- 动态获取有效 Tank 列表 ----------
+@st.cache_data(ttl=60)
+def get_valid_tanks():
+    try:
+        response = sensor_table.scan(Select='SPECIFIC_ATTRIBUTES', AttributesToGet=['device_id'])
+        items = response.get('Items', [])
+        tanks = list(set([item['device_id'] for item in items if 'device_id' in item]))
+        return sorted(tanks) if tanks else ["ESP32_Tank_001"]
+    except Exception:
+        return ["ESP32_Tank_001"]
+
+# ---------- 页面控制 ----------
+page = st.query_params.get("page", "cover")
+
+# ---------- 语言管理 ----------
+lang = st.query_params.get("lang", "zh")
+if lang not in ["zh", "en"]:
+    lang = "zh"
+
+TRANSLATIONS = {
+    "zh": {
+        "app_title": "🌿 藻類監測系統",
+        "tank_label": "當前監控 Tank:",
+        "temp": "溫度",
+        "ph": "pH",
+        "turbidity": "濁度",
+        "salinity": "鹽度",
+        "temp_unit": "°C",
+        "turbidity_unit": "NTU",
+        "salinity_unit": "ppt",
+        "timestamp_label": "設備運行毫秒數：",
+        "no_data_warning": "⚠️ 暫無數據，請檢查表名或設備上報。",
+        "history_title": "📈 歷史趨勢",
+        "slider_label": "顯示最近多少條記錄",
+        "chart_temp": "溫度變化",
+        "chart_ph": "pH 變化",
+        "chart_turbidity": "濁度變化",
+        "insufficient_data": "📭 歷史數據不足（當前 {count} 條），請等待更多採樣點。",
+        "ai_title": "🤖 AI 助手 - {tank}",
+        "ai_input_placeholder": "輸入你的問題…",
+        "ai_thinking": "思考中…",
+        "ai_analyzing": "分析數據中…",
+        "ai_error": "抱歉，無法生成回答。",
+        "clear_memory": "🧹 清空記憶",
+        "clear_success": "已清空該 Tank 的所有聊天記憶",
+        "switch_tank": "🔄 切換 Tank",
+        "auto_refresh_label": "自動刷新數據（每10秒）",
+        "no_api_key_warning": "未配置 {tank} 的 DeepSeek API Key，請在 Secrets 中添加 DEEPSEEK_{key}",
+        "invalid_tank": "⚠️ 當前 Tank 無效，已自動切換至 {tank}",
+        "back_to_cover": "🏠 返回封面頁",
+    },
+    "en": {
+        "app_title": "🌿 Algae Monitor",
+        "tank_label": "Current Tank:",
+        "temp": "Temperature",
+        "ph": "pH",
+        "turbidity": "Turbidity",
+        "salinity": "Salinity",
+        "temp_unit": "°C",
+        "turbidity_unit": "NTU",
+        "salinity_unit": "ppt",
+        "timestamp_label": "Device uptime (ms):",
+        "no_data_warning": "⚠️ No data available. Please check table name or device reporting.",
+        "history_title": "📈 Historical Trends",
+        "slider_label": "Number of recent records to display",
+        "chart_temp": "Temperature Trend",
+        "chart_ph": "pH Trend",
+        "chart_turbidity": "Turbidity Trend",
+        "insufficient_data": "📭 Insufficient historical data (currently {count} records). Please wait for more samples.",
+        "ai_title": "🤖 AI Assistant - {tank}",
+        "ai_input_placeholder": "Ask your question…",
+        "ai_thinking": "Thinking…",
+        "ai_analyzing": "Analyzing data…",
+        "ai_error": "Sorry, unable to generate a response.",
+        "clear_memory": "🧹 Clear Memory",
+        "clear_success": "All chat memory for this Tank has been cleared.",
+        "switch_tank": "🔄 Switch Tank",
+        "auto_refresh_label": "Auto-refresh data (every 10s)",
+        "no_api_key_warning": "DeepSeek API Key not configured for {tank}. Please add DEEPSEEK_{key} in Secrets.",
+        "invalid_tank": "⚠️ Current Tank is invalid, automatically switched to {tank}",
+        "back_to_cover": "🏠 Back to Cover",
+    }
+}
+
+def t(key, **kwargs):
+    text = TRANSLATIONS[lang].get(key, key)
+    if kwargs:
+        return text.format(**kwargs)
+    return text
+
+# ---------- 语言切换 ----------
+col_title, col_lang = st.columns([3, 1])
+with col_lang:
+    selected_lang = st.selectbox(
+        "Language / 語言",
+        options=["zh", "en"],
+        format_func=lambda x: "繁體中文" if x == "zh" else "English",
+        index=0 if lang == "zh" else 1,
+        key="lang_selector"
+    )
+    if selected_lang != lang:
+        st.query_params.lang = selected_lang
+        st.rerun()
+
+# ---------- 获取有效 Tank 列表 ----------
+valid_tanks = get_valid_tanks()
+
+# ---------- 封面页 ----------
+if page != "monitor":
+    current_tank = st.query_params.get("tank", valid_tanks[0] if valid_tanks else "ESP32_Tank_001")
+    if current_tank not in valid_tanks:
+        current_tank = valid_tanks[0] if valid_tanks else "ESP32_Tank_001"
+        st.query_params.tank = current_tank
+        st.rerun()
+
+    st.markdown("""
+        <style>
+        .cover-container {
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            height: 70vh;
+            text-align: center;
+            padding: 20px;
+        }
+        .cover-title {
+            font-size: 3.5rem;
+            font-weight: bold;
+            color: #1abc9c;
+            margin-bottom: 0.5rem;
+        }
+        .cover-sub {
+            font-size: 1.2rem;
+            color: #555;
+            margin-bottom: 1.5rem;
+        }
+        .cover-divider {
+            width: 80px;
+            height: 3px;
+            background: #1abc9c;
+            margin: 1rem auto;
+        }
+        .cover-button {
+            background-color: #1abc9c;
+            color: white;
+            padding: 12px 40px;
+            border-radius: 30px;
+            font-size: 1.2rem;
+            border: none;
+            cursor: pointer;
+            transition: 0.3s;
+        }
+        .cover-button:hover {
+            background-color: #16a085;
+            transform: scale(1.03);
+        }
+        </style>
+    """, unsafe_allow_html=True)
+
+    st.markdown("""
+        <div class="cover-container">
+            <div class="cover-title">🌿 藻類監測系統 Algae Monitor</div>
+            <div style="font-size: 1.1rem; color: #777; margin-bottom: 0.3rem;">
+                智慧監測 ｜ 即時分析 ｜ 數據驅動
+            </div>
+            <div style="font-size: 1.0rem; color: #999; margin-bottom: 0.3rem;">
+                Intelligent Monitoring | Real-time Analysis | Data-driven
+            </div>
+            <div class="cover-divider"></div>
+            <div style="font-size: 1.0rem; color: #444; margin: 0.5rem 0;">
+                選擇培養罐 / Select Tank
+            </div>
+    """, unsafe_allow_html=True)
+
+    selected_tank = st.selectbox(
+        label="",
+        options=valid_tanks,
+        index=valid_tanks.index(current_tank) if current_tank in valid_tanks else 0,
+        key="cover_tank_selector",
+        label_visibility="collapsed"
+    )
+
+    if st.button("🚀 進入監控 Enter Monitor", use_container_width=False):
+        st.query_params.tank = selected_tank
+        st.query_params.lang = lang
+        st.query_params.page = "monitor"
+        st.rerun()
+
+    st.markdown("</div>", unsafe_allow_html=True)
+    st.stop()
+
+# ---------- 监控页 ----------
+tank_id = st.query_params.get("tank", valid_tanks[0] if valid_tanks else "ESP32_Tank_001")
+if tank_id not in valid_tanks:
+    tank_id = valid_tanks[0] if valid_tanks else "ESP32_Tank_001"
+    st.query_params.tank = tank_id
+    st.warning(t("invalid_tank", tank=tank_id))
+    st.rerun()
+
+# ---------- 自动刷新 ----------
+if "pause_autorefresh" not in st.session_state:
+    st.session_state.pause_autorefresh = False
+
+auto_refresh = st.sidebar.checkbox(t("auto_refresh_label"), value=True, key="auto_refresh_checkbox")
+if auto_refresh and not st.session_state.pause_autorefresh:
     st_autorefresh(interval=10000, key="data_refresh")
 
-tank_id = st.query_params.get("tank", "ESP32_Tank_001")
+# ---------- 返回封面按钮（侧边栏） ----------
+st.sidebar.markdown("---")
+if st.sidebar.button(t("back_to_cover"), use_container_width=True):
+    st.query_params.page = None  # 移除 page 参数
+    st.rerun()
 
-# ---------- 工具函数（传感器数据） ----------
+# ---------- 工具函数 ----------
 def convert_decimals(obj):
     if isinstance(obj, list):
         return [convert_decimals(i) for i in obj]
@@ -73,7 +278,6 @@ def get_last_n(device_id, n=500):
     items.reverse()
     return convert_decimals(items)
 
-# ---------- AI 核心功能（Function Calling） ----------
 def query_sensor_data(tank_id, metric, stats='avg', limit=500):
     items = get_last_n(tank_id, n=limit)
     if not items:
@@ -129,7 +333,6 @@ def call_deepseek_with_tools(messages, api_key, tools):
     except Exception as e:
         return f"❌ 请求异常：{e}", None
 
-# ---------- AI 辅助函数 ----------
 def get_deepseek_api_key(tank_id):
     key_name = f"DEEPSEEK_{tank_id.replace('-', '_')}"
     return st.secrets.get(key_name)
@@ -165,26 +368,26 @@ def clear_history(thread_id):
                 Key={'thread_id': item['thread_id'], 'timestamp': item['timestamp']}
             )
 
-# ---------- 主界面 ----------
-st.title("🌿 Algae Box Monitor")
-st.caption(f"当前监控 Tank: **{tank_id}**")
+# ---------- 监控主界面 ----------
+st.title(t("app_title"))
+st.caption(f"{t('tank_label')} **{tank_id}**")
 
 latest = get_latest(tank_id)
 if latest:
     c1, c2, c3, c4 = st.columns(4)
-    c1.metric("🌡️ 温度", f"{latest.get('temperature', 'N/A')} °C")
-    c2.metric("🧪 pH", f"{latest.get('ph', 'N/A')}")
-    c3.metric("💧 浊度", f"{latest.get('turbidity_ntu', 'N/A')} NTU")
-    c4.metric("🧂 盐度", f"{latest.get('salinity', 'N/A')} ppt")
-    st.caption(f"⏱️ 设备运行毫秒数：{latest.get('timestamp', 'N/A')} ms")
+    c1.metric(t("temp"), f"{latest.get('temperature', 'N/A')} {t('temp_unit')}")
+    c2.metric(t("ph"), f"{latest.get('ph', 'N/A')}")
+    c3.metric(t("turbidity"), f"{latest.get('turbidity_ntu', 'N/A')} {t('turbidity_unit')}")
+    c4.metric(t("salinity"), f"{latest.get('salinity', 'N/A')} {t('salinity_unit')}")
+    st.caption(f"{t('timestamp_label')} {latest.get('timestamp', 'N/A')} ms")
 else:
-    st.warning("⚠️ 暂无数据，请检查表名或设备上报。")
+    st.warning(t("no_data_warning"))
 
 st.markdown("---")
 
 # ---------- 历史趋势 ----------
-st.subheader("📈 历史趋势")
-n_points = st.slider("显示最近多少条记录", min_value=10, max_value=500, value=100, step=10)
+st.subheader(t("history_title"))
+n_points = st.slider(t("slider_label"), min_value=10, max_value=500, value=100, step=10)
 history = get_last_n(tank_id, n=n_points)
 if len(history) > 1:
     df = pd.DataFrame(history)
@@ -194,23 +397,23 @@ if len(history) > 1:
         if col in df.columns:
             df[col] = pd.to_numeric(df[col], errors='coerce')
 
-    st.markdown("**温度变化**")
+    st.markdown(f"**{t('chart_temp')}**")
     st.line_chart(df.set_index('timestamp')['temperature'])
-    st.markdown("**pH 变化**")
+    st.markdown(f"**{t('chart_ph')}**")
     st.line_chart(df.set_index('timestamp')['ph'])
-    st.markdown("**浊度变化**")
+    st.markdown(f"**{t('chart_turbidity')}**")
     st.line_chart(df.set_index('timestamp')['turbidity_ntu'])
 else:
-    st.info(f"📭 历史数据不足（当前 {len(history)} 条），请等待更多采样点。")
+    st.info(t("insufficient_data", count=len(history)))
 
 st.markdown("---")
 
 # ---------- AI 聊天助手 ----------
-st.subheader(f"🤖 AI 助手 - {tank_id}")
+st.subheader(t("ai_title", tank=tank_id))
 
 api_key = get_deepseek_api_key(tank_id)
 if not api_key:
-    st.warning(f"未配置 {tank_id} 的 DeepSeek API Key，请在 Secrets 中添加 DEEPSEEK_{tank_id.replace('-', '_')}")
+    st.warning(t("no_api_key_warning", tank=tank_id, key=tank_id.replace('-', '_')))
 else:
     history_messages = load_history(tank_id, limit=50)
     
@@ -222,8 +425,9 @@ else:
             with st.chat_message(role):
                 st.markdown(content)
 
-    user_input = st.chat_input("输入你的问题…")
+    user_input = st.chat_input(t("ai_input_placeholder"))
     if user_input:
+        st.session_state.pause_autorefresh = True
         with st.chat_message("user"):
             st.markdown(user_input)
         save_message(tank_id, "user", user_input)
@@ -254,7 +458,7 @@ else:
             }
         ]
 
-        with st.spinner("思考中…"):
+        with st.spinner(t("ai_thinking")):
             reply, tool_calls = call_deepseek_with_tools(messages, api_key, tools)
 
         if tool_calls:
@@ -272,25 +476,29 @@ else:
                 })
             messages.append({"role": "assistant", "content": None, "tool_calls": tool_calls})
             messages.extend(tool_results)
-            with st.spinner("分析数据中…"):
+            with st.spinner(t("ai_analyzing")):
                 final_reply, _ = call_deepseek_with_tools(messages, api_key, tools)
-                reply = final_reply if final_reply else "抱歉，无法生成回答。"
+                reply = final_reply if final_reply else t("ai_error")
 
         with st.chat_message("assistant"):
             st.markdown(reply)
         save_message(tank_id, "assistant", reply)
+        st.session_state.pause_autorefresh = False
         st.rerun()
 
-    if st.button("🧹 清空记忆"):
+    if st.button(t("clear_memory")):
         clear_history(tank_id)
-        st.success("已清空该 Tank 的所有聊天记忆")
+        st.success(t("clear_success"))
         st.rerun()
 
 # ---------- 设备切换 ----------
-tank_list = ["ESP32_Tank_001"]
-selected = st.selectbox("🔄 切换 Tank", tank_list,
-                        index=tank_list.index(tank_id) if tank_id in tank_list else 0)
-if selected != tank_id:
-    st.query_params.tank = selected
+selected_tank = st.selectbox(
+    t("switch_tank"),
+    options=valid_tanks,
+    index=valid_tanks.index(tank_id) if tank_id in valid_tanks else 0,
+    key="monitor_tank_selector"
+)
+if selected_tank != tank_id:
+    st.session_state.pause_autorefresh = True
+    st.query_params.tank = selected_tank
     st.rerun()
-    #Hello
