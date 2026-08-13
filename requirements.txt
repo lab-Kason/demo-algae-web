@@ -2,3 +2,4 @@ streamlit
 boto3
 pandas
 requests
+streamlit-autorefresh
