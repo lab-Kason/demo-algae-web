@@ -154,7 +154,7 @@ if page != "monitor":
         <style>
         /* 全屏背景图片 + 半透明遮罩 */
         .stApp {
-            background: url("WhatsApp Image 2026-08-13 at 11.25.38.jpeg") no-repeat center center;
+            background: url("cover_bg.jpg") no-repeat center center;
             background-size: cover;
         }
         .stApp::before {
