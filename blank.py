@@ -8,6 +8,7 @@ import json
 import time
 import requests
 from datetime import datetime
+from streamlit_autorefresh import st_autorefresh  # 新增自动刷新组件
 
 # ---------- 从 Secrets 读取凭证 ----------
 AWS_ACCESS_KEY_ID = st.secrets["AWS_ACCESS_KEY_ID"]
@@ -20,15 +21,27 @@ os.environ['AWS_DEFAULT_REGION'] = AWS_DEFAULT_REGION
 
 # ---------- AWS 资源 ----------
 REGION = AWS_DEFAULT_REGION
-SENSOR_TABLE = "TankSensorData"      # 传感器数据表
-CHAT_TABLE = "ChatHistory"           # 聊天记录表
+SENSOR_TABLE = "TankSensorData"
+CHAT_TABLE = "ChatHistory"
 
 dynamodb = boto3.resource('dynamodb', region_name=REGION)
 sensor_table = dynamodb.Table(SENSOR_TABLE)
 chat_table = dynamodb.Table(CHAT_TABLE)
 
 # ---------- 页面配置 ----------
-st.set_page_config(page_title="Algae Box Monitor", layout="wide")
+st.set_page_config(
+    page_title="Algae Box Monitor",
+    page_icon="🌿",
+    layout="wide"
+)
+
+# ---------- 自动刷新（每10秒，仅在未进行聊天输入时有效） ----------
+# 注意：自动刷新会重新运行整个脚本，但不会丢失聊天历史（存在DynamoDB）
+# 如果用户正在输入，刷新会中断输入，因此建议在演示时使用，或提供开关
+auto_refresh = st.sidebar.checkbox("自动刷新数据（每10秒）", value=True)
+if auto_refresh:
+    st_autorefresh(interval=10000, key="data_refresh")
+
 tank_id = st.query_params.get("tank", "ESP32_Tank_001")
 
 # ---------- 工具函数（传感器数据） ----------
@@ -57,33 +70,20 @@ def get_last_n(device_id, n=500):
         ScanIndexForward=False
     )
     items = resp.get('Items', [])
-    items.reverse()  # 升序（旧→新）
+    items.reverse()
     return convert_decimals(items)
 
 # ---------- AI 核心功能（Function Calling） ----------
-
 def query_sensor_data(tank_id, metric, stats='avg', limit=500):
-    """
-    查询指定 Tank 的历史传感器数据，返回统计摘要。
-    参数：
-        tank_id: 设备ID
-        metric: 'temperature', 'ph', 'turbidity_ntu'
-        stats: 'avg' (平均值), 'min' (最小值), 'max' (最大值), 'trend' (趋势)
-        limit: 查询最近多少条记录
-    返回：字符串形式的统计结果
-    """
     items = get_last_n(tank_id, n=limit)
     if not items:
         return "没有可用的历史数据。"
-    
     df = pd.DataFrame(items)
     if metric not in df.columns:
         return f"错误：指标 '{metric}' 不存在。可用指标：temperature, ph, turbidity_ntu"
-    
     data = df[metric].dropna()
     if len(data) == 0:
         return f"指标 '{metric}' 无有效数值。"
-    
     if stats == 'avg':
         return f"{metric} 的平均值为 {data.mean():.2f}"
     elif stats == 'min':
@@ -102,10 +102,6 @@ def query_sensor_data(tank_id, metric, stats='avg', limit=500):
         return f"不支持的统计方式 '{stats}'，请使用 avg, min, max, trend"
 
 def call_deepseek_with_tools(messages, api_key, tools):
-    """
-    调用 DeepSeek API，支持工具调用。
-    返回 (reply, tool_calls) 元组。
-    """
     url = "https://api.deepseek.com/v1/chat/completions"
     headers = {
         "Authorization": f"Bearer {api_key}",
@@ -209,17 +205,15 @@ else:
 
 st.markdown("---")
 
-# ---------- AI 聊天助手（带 Function Calling） ----------
+# ---------- AI 聊天助手 ----------
 st.subheader(f"🤖 AI 助手 - {tank_id}")
 
 api_key = get_deepseek_api_key(tank_id)
 if not api_key:
     st.warning(f"未配置 {tank_id} 的 DeepSeek API Key，请在 Secrets 中添加 DEEPSEEK_{tank_id.replace('-', '_')}")
 else:
-    # 加载历史消息
     history_messages = load_history(tank_id, limit=50)
     
-    # 显示聊天历史
     chat_container = st.container()
     with chat_container:
         for msg in history_messages:
@@ -228,24 +222,19 @@ else:
             with st.chat_message(role):
                 st.markdown(content)
 
-    # 输入框
     user_input = st.chat_input("输入你的问题…")
     if user_input:
-        # 显示用户消息
         with st.chat_message("user"):
             st.markdown(user_input)
         save_message(tank_id, "user", user_input)
 
-        # 构建消息列表（系统提示 + 历史记录 + 当前问题）
         messages = [
             {"role": "system", "content": "你是一位藻类养殖专家，你能调用工具查询历史传感器数据，根据数据回答问题。当用户询问温度、pH、浊度等历史趋势或统计时，使用 query_sensor_data 工具。"}
         ]
-        # 添加历史记录（最多最近 20 条）
         for msg in history_messages[-20:]:
             messages.append({"role": msg['role'], "content": msg['content']})
         messages.append({"role": "user", "content": user_input})
 
-        # 定义工具
         tools = [
             {
                 "type": "function",
@@ -255,20 +244,9 @@ else:
                     "parameters": {
                         "type": "object",
                         "properties": {
-                            "tank_id": {
-                                "type": "string",
-                                "description": "培养罐的唯一标识，例如 ESP32_Tank_001"
-                            },
-                            "metric": {
-                                "type": "string",
-                                "enum": ["temperature", "ph", "turbidity_ntu"],
-                                "description": "要查询的指标名称"
-                            },
-                            "stats": {
-                                "type": "string",
-                                "enum": ["avg", "min", "max", "trend"],
-                                "description": "统计方式：avg(平均值), min(最小值), max(最大值), trend(趋势)"
-                            }
+                            "tank_id": {"type": "string", "description": "培养罐的唯一标识，例如 ESP32_Tank_001"},
+                            "metric": {"type": "string", "enum": ["temperature", "ph", "turbidity_ntu"], "description": "要查询的指标名称"},
+                            "stats": {"type": "string", "enum": ["avg", "min", "max", "trend"], "description": "统计方式：avg, min, max, trend"}
                         },
                         "required": ["tank_id", "metric"]
                     }
@@ -276,18 +254,14 @@ else:
             }
         ]
 
-        # 第一次调用 AI（可能返回工具调用）
         with st.spinner("思考中…"):
             reply, tool_calls = call_deepseek_with_tools(messages, api_key, tools)
 
-        # 处理工具调用
         if tool_calls:
-            # 执行工具调用
             tool_results = []
             for tc in tool_calls:
                 fn = tc['function']
                 args = json.loads(fn['arguments'])
-                # 确保 tank_id 使用当前上下文
                 if 'tank_id' not in args:
                     args['tank_id'] = tank_id
                 result = query_sensor_data(**args)
@@ -296,35 +270,27 @@ else:
                     "role": "tool",
                     "content": result
                 })
-            
-            # 将工具结果附加到消息列表
             messages.append({"role": "assistant", "content": None, "tool_calls": tool_calls})
             messages.extend(tool_results)
-            
-            # 第二次调用 AI，获取最终回答
             with st.spinner("分析数据中…"):
                 final_reply, _ = call_deepseek_with_tools(messages, api_key, tools)
                 reply = final_reply if final_reply else "抱歉，无法生成回答。"
 
-        # 显示 AI 回复
         with st.chat_message("assistant"):
             st.markdown(reply)
         save_message(tank_id, "assistant", reply)
-
-        # 刷新页面
         st.rerun()
 
-    # 清空记忆按钮
     if st.button("🧹 清空记忆"):
         clear_history(tank_id)
         st.success("已清空该 Tank 的所有聊天记忆")
         st.rerun()
 
 # ---------- 设备切换 ----------
-tank_list = ["ESP32_Tank_001"]   # 可扩展
+tank_list = ["ESP32_Tank_001"]
 selected = st.selectbox("🔄 切换 Tank", tank_list,
                         index=tank_list.index(tank_id) if tank_id in tank_list else 0)
 if selected != tank_id:
     st.query_params.tank = selected
     st.rerun()
-    #hello
+    #Hello
