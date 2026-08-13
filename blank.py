@@ -21,7 +21,7 @@ os.environ['AWS_DEFAULT_REGION'] = AWS_DEFAULT_REGION
 # ---------- AWS 资源 ----------
 REGION = AWS_DEFAULT_REGION
 SENSOR_TABLE = "TankSensorData"      # 传感器数据表
-CHAT_TABLE = "ChatHistory"           # 聊天记录表（新建）
+CHAT_TABLE = "ChatHistory"           # 聊天记录表
 
 dynamodb = boto3.resource('dynamodb', region_name=REGION)
 sensor_table = dynamodb.Table(SENSOR_TABLE)
@@ -50,26 +50,96 @@ def get_latest(device_id):
     items = resp.get('Items', [])
     return convert_decimals(items[0]) if items else None
 
-def get_last_n(device_id, n=100):
+def get_last_n(device_id, n=500):
     resp = sensor_table.query(
         KeyConditionExpression=Key('device_id').eq(device_id),
         Limit=n,
         ScanIndexForward=False
     )
     items = resp.get('Items', [])
-    items.reverse()
+    items.reverse()  # 升序（旧→新）
     return convert_decimals(items)
 
-# ---------- AI 相关函数 ----------
+# ---------- AI 核心功能（Function Calling） ----------
+
+def query_sensor_data(tank_id, metric, stats='avg', limit=500):
+    """
+    查询指定 Tank 的历史传感器数据，返回统计摘要。
+    参数：
+        tank_id: 设备ID
+        metric: 'temperature', 'ph', 'turbidity_ntu'
+        stats: 'avg' (平均值), 'min' (最小值), 'max' (最大值), 'trend' (趋势)
+        limit: 查询最近多少条记录
+    返回：字符串形式的统计结果
+    """
+    items = get_last_n(tank_id, n=limit)
+    if not items:
+        return "没有可用的历史数据。"
+    
+    df = pd.DataFrame(items)
+    if metric not in df.columns:
+        return f"错误：指标 '{metric}' 不存在。可用指标：temperature, ph, turbidity_ntu"
+    
+    data = df[metric].dropna()
+    if len(data) == 0:
+        return f"指标 '{metric}' 无有效数值。"
+    
+    if stats == 'avg':
+        return f"{metric} 的平均值为 {data.mean():.2f}"
+    elif stats == 'min':
+        return f"{metric} 的最小值为 {data.min():.2f}"
+    elif stats == 'max':
+        return f"{metric} 的最大值为 {data.max():.2f}"
+    elif stats == 'trend':
+        half = len(data) // 2
+        if half < 2:
+            return "数据点太少，无法判断趋势。"
+        early = data[:half].mean()
+        late = data[half:].mean()
+        direction = "上升" if late > early else "下降" if late < early else "平稳"
+        return f"{metric} 整体趋势 {direction}，前半段平均 {early:.2f}，后半段平均 {late:.2f}"
+    else:
+        return f"不支持的统计方式 '{stats}'，请使用 avg, min, max, trend"
+
+def call_deepseek_with_tools(messages, api_key, tools):
+    """
+    调用 DeepSeek API，支持工具调用。
+    返回 (reply, tool_calls) 元组。
+    """
+    url = "https://api.deepseek.com/v1/chat/completions"
+    headers = {
+        "Authorization": f"Bearer {api_key}",
+        "Content-Type": "application/json"
+    }
+    payload = {
+        "model": "deepseek-chat",
+        "messages": messages,
+        "tools": tools,
+        "tool_choice": "auto",
+        "temperature": 0.7,
+        "max_tokens": 800
+    }
+    try:
+        response = requests.post(url, headers=headers, json=payload, timeout=30)
+        if response.status_code != 200:
+            return f"❌ API 错误：{response.status_code} - {response.text}", None
+        data = response.json()
+        choice = data['choices'][0]
+        msg = choice['message']
+        if 'tool_calls' in msg and msg['tool_calls']:
+            return None, msg['tool_calls']
+        else:
+            return msg['content'], None
+    except Exception as e:
+        return f"❌ 请求异常：{e}", None
+
+# ---------- AI 辅助函数 ----------
 def get_deepseek_api_key(tank_id):
-    """根据 tank_id 返回对应的 DeepSeek API Key"""
-    # 在 secrets 中预置 TANK_001, TANK_002 ...
-    key_name = f"DEEPSEEK_{tank_id.replace('-', '_')}"  # 将 - 替换为 _
+    key_name = f"DEEPSEEK_{tank_id.replace('-', '_')}"
     return st.secrets.get(key_name)
 
 def save_message(thread_id, role, content):
-    """将一条消息存入 ChatHistory 表"""
-    timestamp = int(time.time() * 1000)  # 毫秒
+    timestamp = int(time.time() * 1000)
     chat_table.put_item(
         Item={
             'thread_id': thread_id,
@@ -79,21 +149,17 @@ def save_message(thread_id, role, content):
         }
     )
 
-def load_history(thread_id, limit=20):
-    """加载最近 limit 条消息（按时间升序）"""
+def load_history(thread_id, limit=50):
     resp = chat_table.query(
         KeyConditionExpression=Key('thread_id').eq(thread_id),
         Limit=limit,
-        ScanIndexForward=True  # 升序（旧->新）
+        ScanIndexForward=True
     )
     items = resp.get('Items', [])
-    # 按时间戳排序（确保顺序）
     items.sort(key=lambda x: x['timestamp'])
     return items
 
 def clear_history(thread_id):
-    """删除该 thread 的所有聊天记录"""
-    # 先扫描所有消息
     resp = chat_table.query(
         KeyConditionExpression=Key('thread_id').eq(thread_id)
     )
@@ -102,25 +168,6 @@ def clear_history(thread_id):
             batch.delete_item(
                 Key={'thread_id': item['thread_id'], 'timestamp': item['timestamp']}
             )
-
-def call_deepseek(messages, api_key):
-    """调用 DeepSeek API（兼容 OpenAI）"""
-    url = "https://api.deepseek.com/v1/chat/completions"
-    headers = {
-        "Authorization": f"Bearer {api_key}",
-        "Content-Type": "application/json"
-    }
-    payload = {
-        "model": "deepseek-chat",
-        "messages": messages,
-        "temperature": 0.7,
-        "max_tokens": 500
-    }
-    response = requests.post(url, headers=headers, json=payload, timeout=30)
-    if response.status_code == 200:
-        return response.json()['choices'][0]['message']['content']
-    else:
-        return f"❌ AI 调用失败：{response.status_code} - {response.text}"
 
 # ---------- 主界面 ----------
 st.title("🌿 Algae Box Monitor")
@@ -162,10 +209,9 @@ else:
 
 st.markdown("---")
 
-# ---------- AI 聊天助手（每个 Tank 独立） ----------
+# ---------- AI 聊天助手（带 Function Calling） ----------
 st.subheader(f"🤖 AI 助手 - {tank_id}")
 
-# 获取该 Tank 的 API Key
 api_key = get_deepseek_api_key(tank_id)
 if not api_key:
     st.warning(f"未配置 {tank_id} 的 DeepSeek API Key，请在 Secrets 中添加 DEEPSEEK_{tank_id.replace('-', '_')}")
@@ -188,30 +234,84 @@ else:
         # 显示用户消息
         with st.chat_message("user"):
             st.markdown(user_input)
-        # 保存用户消息
         save_message(tank_id, "user", user_input)
 
         # 构建消息列表（系统提示 + 历史记录 + 当前问题）
         messages = [
-            {"role": "system", "content": "你是一位藻类养殖专家，负责分析传感器数据并提供建议。"}
+            {"role": "system", "content": "你是一位藻类养殖专家，你能调用工具查询历史传感器数据，根据数据回答问题。当用户询问温度、pH、浊度等历史趋势或统计时，使用 query_sensor_data 工具。"}
         ]
-        # 添加历史记录（最多保留最近 20 条，节省 token）
+        # 添加历史记录（最多最近 20 条）
         for msg in history_messages[-20:]:
             messages.append({"role": msg['role'], "content": msg['content']})
-        # 添加当前问题
         messages.append({"role": "user", "content": user_input})
 
-        # 调用 AI
-        with st.spinner("思考中…"):
-            reply = call_deepseek(messages, api_key)
+        # 定义工具
+        tools = [
+            {
+                "type": "function",
+                "function": {
+                    "name": "query_sensor_data",
+                    "description": "查询指定藻类培养罐（Tank）的历史传感器数据，返回统计摘要（平均值、最小值、最大值或趋势）。",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "tank_id": {
+                                "type": "string",
+                                "description": "培养罐的唯一标识，例如 ESP32_Tank_001"
+                            },
+                            "metric": {
+                                "type": "string",
+                                "enum": ["temperature", "ph", "turbidity_ntu"],
+                                "description": "要查询的指标名称"
+                            },
+                            "stats": {
+                                "type": "string",
+                                "enum": ["avg", "min", "max", "trend"],
+                                "description": "统计方式：avg(平均值), min(最小值), max(最大值), trend(趋势)"
+                            }
+                        },
+                        "required": ["tank_id", "metric"]
+                    }
+                }
+            }
+        ]
 
-        # 显示回复
+        # 第一次调用 AI（可能返回工具调用）
+        with st.spinner("思考中…"):
+            reply, tool_calls = call_deepseek_with_tools(messages, api_key, tools)
+
+        # 处理工具调用
+        if tool_calls:
+            # 执行工具调用
+            tool_results = []
+            for tc in tool_calls:
+                fn = tc['function']
+                args = json.loads(fn['arguments'])
+                # 确保 tank_id 使用当前上下文
+                if 'tank_id' not in args:
+                    args['tank_id'] = tank_id
+                result = query_sensor_data(**args)
+                tool_results.append({
+                    "tool_call_id": tc['id'],
+                    "role": "tool",
+                    "content": result
+                })
+            
+            # 将工具结果附加到消息列表
+            messages.append({"role": "assistant", "content": None, "tool_calls": tool_calls})
+            messages.extend(tool_results)
+            
+            # 第二次调用 AI，获取最终回答
+            with st.spinner("分析数据中…"):
+                final_reply, _ = call_deepseek_with_tools(messages, api_key, tools)
+                reply = final_reply if final_reply else "抱歉，无法生成回答。"
+
+        # 显示 AI 回复
         with st.chat_message("assistant"):
             st.markdown(reply)
-        # 保存回复
         save_message(tank_id, "assistant", reply)
 
-        # 刷新页面（显示新消息）
+        # 刷新页面
         st.rerun()
 
     # 清空记忆按钮
@@ -228,4 +328,3 @@ if selected != tank_id:
     st.query_params.tank = selected
     st.rerun()
     #hello
-    
