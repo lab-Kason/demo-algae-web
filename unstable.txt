@@ -35,26 +35,16 @@ st.set_page_config(
     layout="wide"
 )
 
-# ---------- 动态获取有效 Tank 列表 ----------
-@st.cache_data(ttl=60)  # 缓存60秒，减少扫描频率
-def get_valid_tanks():
-    """扫描传感器表，返回所有存在的 device_id 列表"""
-    try:
-        response = sensor_table.scan(Select='SPECIFIC_ATTRIBUTES', AttributesToGet=['device_id'])
-        items = response.get('Items', [])
-        tanks = list(set([item['device_id'] for item in items if 'device_id' in item]))
-        return sorted(tanks) if tanks else ["ESP32_Tank_001"]  # 如果没有数据，返回默认
-    except Exception as e:
-        return ["ESP32_Tank_001"]  # 出错时返回默认
-
 # ---------- 页面控制（封面/监控） ----------
-page = st.query_params.get("page", "cover")
+page = st.query_params.get("page", "cover")  # 默认为 cover
 
 # ---------- 语言管理 ----------
+# 从 URL 参数获取语言，默认为繁体中文
 lang = st.query_params.get("lang", "zh")
 if lang not in ["zh", "en"]:
     lang = "zh"
 
+# 定义翻译字典（监控页用）
 TRANSLATIONS = {
     "zh": {
         "app_title": "🌿 藻類監測系統",
@@ -84,7 +74,6 @@ TRANSLATIONS = {
         "switch_tank": "🔄 切換 Tank",
         "auto_refresh_label": "自動刷新數據（每10秒）",
         "no_api_key_warning": "未配置 {tank} 的 DeepSeek API Key，請在 Secrets 中添加 DEEPSEEK_{key}",
-        "invalid_tank": "⚠️ 當前 Tank 無效，已自動切換至 {tank}",
     },
     "en": {
         "app_title": "🌿 Algae Monitor",
@@ -114,7 +103,6 @@ TRANSLATIONS = {
         "switch_tank": "🔄 Switch Tank",
         "auto_refresh_label": "Auto-refresh data (every 10s)",
         "no_api_key_warning": "DeepSeek API Key not configured for {tank}. Please add DEEPSEEK_{key} in Secrets.",
-        "invalid_tank": "⚠️ Current Tank is invalid, automatically switched to {tank}",
     }
 }
 
@@ -124,7 +112,7 @@ def t(key, **kwargs):
         return text.format(**kwargs)
     return text
 
-# ---------- 语言切换（右上角） ----------
+# ---------- 语言切换（右上角，始终显示） ----------
 col_title, col_lang = st.columns([3, 1])
 with col_lang:
     selected_lang = st.selectbox(
@@ -138,18 +126,14 @@ with col_lang:
         st.query_params.lang = selected_lang
         st.rerun()
 
-# ---------- 获取有效 Tank 列表 ----------
-valid_tanks = get_valid_tanks()
-
-# ---------- 封面页 ----------
+# ---------- 封面页（如果 page 不是 monitor） ----------
 if page != "monitor":
-    current_tank = st.query_params.get("tank", valid_tanks[0] if valid_tanks else "ESP32_Tank_001")
-    # 如果当前 tank 不在有效列表中，自动修正
-    if current_tank not in valid_tanks:
-        current_tank = valid_tanks[0] if valid_tanks else "ESP32_Tank_001"
-        st.query_params.tank = current_tank
-        st.rerun()
+    # 读取当前 tank 参数（默认 ESP32_Tank_001）
+    current_tank = st.query_params.get("tank", "ESP32_Tank_001")
+    # 定义可选 tank 列表（可扩展）
+    tank_options = ["ESP32_Tank_001", "ESP32_Tank_002"]  # 根据实际情况添加
 
+    # 封面页样式
     st.markdown("""
         <style>
         .cover-container {
@@ -200,6 +184,7 @@ if page != "monitor":
         </style>
     """, unsafe_allow_html=True)
 
+    # 封面内容（固定双语）
     st.markdown("""
         <div class="cover-container">
             <div class="cover-title">🌿 藻類監測系統 Algae Monitor</div>
@@ -215,39 +200,36 @@ if page != "monitor":
             </div>
     """, unsafe_allow_html=True)
 
+    # Tank 选择器（放置在封面中央）
     selected_tank = st.selectbox(
-        label="",
-        options=valid_tanks,
-        index=valid_tanks.index(current_tank) if current_tank in valid_tanks else 0,
+        label="",  # 隐藏标签
+        options=tank_options,
+        index=tank_options.index(current_tank) if current_tank in tank_options else 0,
         key="cover_tank_selector",
         label_visibility="collapsed"
     )
 
+    # 进入按钮
     if st.button("🚀 進入監控 Enter Monitor", use_container_width=False):
+        # 更新 URL 参数
         st.query_params.tank = selected_tank
         st.query_params.lang = lang
         st.query_params.page = "monitor"
         st.rerun()
 
     st.markdown("</div>", unsafe_allow_html=True)
+
+    # 停止执行，不显示监控内容
     st.stop()
 
-# ---------- 监控页 ----------
-# 自动修正无效 tank
-tank_id = st.query_params.get("tank", valid_tanks[0] if valid_tanks else "ESP32_Tank_001")
-if tank_id not in valid_tanks:
-    tank_id = valid_tanks[0] if valid_tanks else "ESP32_Tank_001"
-    st.query_params.tank = tank_id
-    st.warning(t("invalid_tank", tank=tank_id))
-    st.rerun()
+# ---------- 以下为监控页（仅当 page == "monitor" 时执行） ----------
 
-# ---------- 自动刷新（带暂停标记） ----------
-if "pause_autorefresh" not in st.session_state:
-    st.session_state.pause_autorefresh = False
-
-auto_refresh = st.sidebar.checkbox(t("auto_refresh_label"), value=True, key="auto_refresh_checkbox")
-if auto_refresh and not st.session_state.pause_autorefresh:
+# ---------- 自动刷新（侧边栏） ----------
+auto_refresh = st.sidebar.checkbox(t("auto_refresh_label"), value=True)
+if auto_refresh:
     st_autorefresh(interval=10000, key="data_refresh")
+
+tank_id = st.query_params.get("tank", "ESP32_Tank_001")
 
 # ---------- 工具函数（传感器数据） ----------
 def convert_decimals(obj):
@@ -429,8 +411,6 @@ else:
 
     user_input = st.chat_input(t("ai_input_placeholder"))
     if user_input:
-        # 暂停自动刷新，避免中断
-        st.session_state.pause_autorefresh = True
         with st.chat_message("user"):
             st.markdown(user_input)
         save_message(tank_id, "user", user_input)
@@ -486,7 +466,6 @@ else:
         with st.chat_message("assistant"):
             st.markdown(reply)
         save_message(tank_id, "assistant", reply)
-        st.session_state.pause_autorefresh = False
         st.rerun()
 
     if st.button(t("clear_memory")):
@@ -495,14 +474,9 @@ else:
         st.rerun()
 
 # ---------- 设备切换 ----------
-# 使用动态列表，并在切换时暂停自动刷新
-selected_tank = st.selectbox(
-    t("switch_tank"),
-    options=valid_tanks,
-    index=valid_tanks.index(tank_id) if tank_id in valid_tanks else 0,
-    key="monitor_tank_selector"
-)
-if selected_tank != tank_id:
-    st.session_state.pause_autorefresh = True
-    st.query_params.tank = selected_tank
+tank_list = ["ESP32_Tank_001", "ESP32_Tank_002"]  # 可扩展
+selected = st.selectbox(t("switch_tank"), tank_list,
+                        index=tank_list.index(tank_id) if tank_id in tank_list else 0)
+if selected != tank_id:
+    st.query_params.tank = selected
     st.rerun()
