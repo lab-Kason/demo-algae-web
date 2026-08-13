@@ -227,3 +227,5 @@ selected = st.selectbox("🔄 切换 Tank", tank_list,
 if selected != tank_id:
     st.query_params.tank = selected
     st.rerun()
+    #hello
+    
