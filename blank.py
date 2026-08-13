@@ -35,13 +35,16 @@ st.set_page_config(
     layout="wide"
 )
 
+# ---------- 页面控制（封面/监控） ----------
+page = st.query_params.get("page", "cover")  # 默认为 cover
+
 # ---------- 语言管理 ----------
 # 从 URL 参数获取语言，默认为繁体中文
 lang = st.query_params.get("lang", "zh")
 if lang not in ["zh", "en"]:
     lang = "zh"
 
-# 定义翻译字典
+# 定义翻译字典（监控页用）
 TRANSLATIONS = {
     "zh": {
         "app_title": "🌿 藻類監測系統",
@@ -104,14 +107,12 @@ TRANSLATIONS = {
 }
 
 def t(key, **kwargs):
-    """返回当前语言的翻译文本，支持格式化参数"""
     text = TRANSLATIONS[lang].get(key, key)
     if kwargs:
         return text.format(**kwargs)
     return text
 
-# ---------- 语言切换（右上角） ----------
-# 使用 columns 布局，左侧留空，右侧放下拉框
+# ---------- 语言切换（右上角，始终显示） ----------
 col_title, col_lang = st.columns([3, 1])
 with col_lang:
     selected_lang = st.selectbox(
@@ -122,9 +123,106 @@ with col_lang:
         key="lang_selector"
     )
     if selected_lang != lang:
-        # 更新 URL 参数并刷新
         st.query_params.lang = selected_lang
         st.rerun()
+
+# ---------- 封面页（如果 page 不是 monitor） ----------
+if page != "monitor":
+    # 读取当前 tank 参数（默认 ESP32_Tank_001）
+    current_tank = st.query_params.get("tank", "ESP32_Tank_001")
+    # 定义可选 tank 列表（可扩展）
+    tank_options = ["ESP32_Tank_001", "ESP32_Tank_002"]  # 根据实际情况添加
+
+    # 封面页样式
+    st.markdown("""
+        <style>
+        .cover-container {
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            height: 70vh;
+            text-align: center;
+            padding: 20px;
+        }
+        .cover-title {
+            font-size: 3.5rem;
+            font-weight: bold;
+            color: #1abc9c;
+            margin-bottom: 0.5rem;
+        }
+        .cover-sub {
+            font-size: 1.2rem;
+            color: #555;
+            margin-bottom: 1.5rem;
+        }
+        .cover-divider {
+            width: 80px;
+            height: 3px;
+            background: #1abc9c;
+            margin: 1rem auto;
+        }
+        .cover-select {
+            margin: 1.5rem 0;
+        }
+        .cover-button {
+            background-color: #1abc9c;
+            color: white;
+            padding: 12px 40px;
+            border-radius: 30px;
+            font-size: 1.2rem;
+            border: none;
+            cursor: pointer;
+            transition: 0.3s;
+            text-decoration: none;
+            display: inline-block;
+        }
+        .cover-button:hover {
+            background-color: #16a085;
+            transform: scale(1.03);
+        }
+        </style>
+    """, unsafe_allow_html=True)
+
+    # 封面内容（固定双语）
+    st.markdown("""
+        <div class="cover-container">
+            <div class="cover-title">🌿 藻類監測系統 Algae Monitor</div>
+            <div style="font-size: 1.1rem; color: #777; margin-bottom: 0.3rem;">
+                智慧監測 ｜ 即時分析 ｜ 數據驅動
+            </div>
+            <div style="font-size: 1.0rem; color: #999; margin-bottom: 0.3rem;">
+                Intelligent Monitoring | Real-time Analysis | Data-driven
+            </div>
+            <div class="cover-divider"></div>
+            <div style="font-size: 1.0rem; color: #444; margin: 0.5rem 0;">
+                選擇培養罐 / Select Tank
+            </div>
+    """, unsafe_allow_html=True)
+
+    # Tank 选择器（放置在封面中央）
+    selected_tank = st.selectbox(
+        label="",  # 隐藏标签
+        options=tank_options,
+        index=tank_options.index(current_tank) if current_tank in tank_options else 0,
+        key="cover_tank_selector",
+        label_visibility="collapsed"
+    )
+
+    # 进入按钮
+    if st.button("🚀 進入監控 Enter Monitor", use_container_width=False):
+        # 更新 URL 参数
+        st.query_params.tank = selected_tank
+        st.query_params.lang = lang
+        st.query_params.page = "monitor"
+        st.rerun()
+
+    st.markdown("</div>", unsafe_allow_html=True)
+
+    # 停止执行，不显示监控内容
+    st.stop()
+
+# ---------- 以下为监控页（仅当 page == "monitor" 时执行） ----------
 
 # ---------- 自动刷新（侧边栏） ----------
 auto_refresh = st.sidebar.checkbox(t("auto_refresh_label"), value=True)
@@ -254,8 +352,7 @@ def clear_history(thread_id):
                 Key={'thread_id': item['thread_id'], 'timestamp': item['timestamp']}
             )
 
-# ---------- 主界面 ----------
-# 使用翻译后的标题
+# ---------- 监控主界面 ----------
 st.title(t("app_title"))
 st.caption(f"{t('tank_label')} **{tank_id}**")
 
@@ -377,7 +474,7 @@ else:
         st.rerun()
 
 # ---------- 设备切换 ----------
-tank_list = ["ESP32_Tank_001"]
+tank_list = ["ESP32_Tank_001", "ESP32_Tank_002"]  # 可扩展
 selected = st.selectbox(t("switch_tank"), tank_list,
                         index=tank_list.index(tank_id) if tank_id in tank_list else 0)
 if selected != tank_id:
